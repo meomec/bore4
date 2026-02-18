@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
+# ========================================================
+# bore4 - Wrapper intelligent pour bore avec fallback IPv4
+# ========================================================
+# Ce script crée des tunnels TCP vers bore.pub avec support
+# automatique du fallback IPv4 quand IPv6 est indisponible
+# ========================================================
+
 set -euo pipefail
 
-HOST="bore.pub"
-CACHE_FILE="$HOME/.bore4_cache"
-TIMEOUT=2
-RETRIES=2
-CONFIG_FILE="$HOME/.bore4rc"
+#!/usr/bin/env bash
+# ========================================================
+# bore4 - Wrapper intelligent pour bore avec fallback IPv4
+# ========================================================
+# Ce script crée des tunnels TCP vers bore.pub avec support
+# automatique du fallback IPv4 quand IPv6 est indisponible
+# ========================================================
 
+set -euo pipefail
+
+# ========================================================
+# CONFIGURATION ET VARIABLES
+# ========================================================
+HOST="bore.pub"          # Serveur bore par defaut
+CACHE_FILE="$HOME/.bore4_cache"  # Cache local pour les IPs resolues
+TIMEOUT=2                # Timeout pour les tests de connectivite
+RETRIES=2                # Nombre de tentatives pour lancer bore
+CONFIG_FILE="$HOME/.bore4rc"  # Fichier de config facultatif
+
+# Charge le fichier de config s'il existe
 [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
-RED="\033[0;31m"
-GREEN="\033[0;32m"
-YELLOW="\033[0;33m"
-BLUE="\033[0;34m"
-RESET="\033[0m"
+# ========================================================
+# COULEURS POUR L'AFFICHAGE
+# ========================================================
 
+# Affiche une animation de chargement pendant l'execution d'un processus
 spinner() {
   local pid=$1
   local delay=0.1
@@ -28,9 +48,10 @@ spinner() {
   done
 }
 
-log() { echo -e "${BLUE}🔹 $1${RESET}"; }
-warn() { echo -e "${YELLOW}⚠️  $1${RESET}"; }
-error() { echo -e "${RED}❌ $1${RESET}"; }
+# Fonctions d'affichage avec couleurs pour les messages
+log() { echo -e "${BLUE}🔹 $1${RESET}"; }      # Message info en bleu
+warn() { echo -e "${YELLOW}⚠️  $1${RESET}"; }      # Message avertissement en jaune
+error() { echo -e "${RED}❌ $1${RESET}"; }     # Message erreur en rouge
 
 print_help() {
 cat <<EOF
@@ -53,6 +74,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
+# Récupère le port local depuis les paramètres
 PORT="${1:-}"
 if [[ -z "$PORT" ]]; then
   print_help
@@ -60,19 +82,87 @@ if [[ -z "$PORT" ]]; then
 fi
 
 shift || true
-EXTRA_ARGS="$@"
+EXTRA_ARGS="$@"  # Arguments additionnels pour bore
+
+
+# ============================================
+# VALIDATION DU PORT
+# ============================================
+# Vérifie que le port est un nombre valide
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+  error "Invalid port: '$PORT'"
+  echo
+  echo "💡 Port must be a number between 1 and 65535"
+  exit 1
+fi
+
+# Vérifie que le port est dans la plage valide (1-65535)
+if (( PORT < 1 || PORT > 65535 )); then
+  error "Port out of range: $PORT"
+  exit 1
+fi
+
+# ============================================
+# VÉRIFICATION DU SERVICE LOCAL
+# ============================================
+# Vérifie qu'un service écoute bien sur le port
+log "Checking local service on port $PORT..."
+
+# Désactive temporairement l'exit sur erreur pour lsof
+set +e
+PROCESS_INFO=$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2')
+set -e
+
+if [[ -z "$PROCESS_INFO" ]]; then
+  error "No service is listening on localhost:$PORT"
+  echo
+
+  echo "🔎 Diagnostics:"
+  echo "   • Port $PORT is CLOSED"
+  echo "   • Bore would create a tunnel to nowhere"
+  echo
+
+  echo "💡 Possible fixes:"
+  echo "   • Start your service"
+  echo "   • Check the port number"
+  echo
+
+  echo "📊 Active listening ports:"
+  lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | head -n 10
+
+  echo
+  exit 1
+fi
+
+PROCESS_NAME=$(echo "$PROCESS_INFO" | awk '{print $1}')
+PROCESS_PID=$(echo "$PROCESS_INFO" | awk '{print $2}')
+PROCESS_ADDR=$(echo "$PROCESS_INFO" | awk '{print $9}')
+
+log "Detected process: $PROCESS_NAME (PID $PROCESS_PID) on $PROCESS_ADDR ✔"
+
+
+
+
+
 
 log "Checking IPv6 connectivity..."
+# Test la connectivité IPv6 vers le serveur bore
 if nc -6 -z -G "$TIMEOUT" "$HOST" 7835 >/dev/null 2>&1; then
-  log "IPv6 OK → using hostname"
+  log "IPv6 OK → using hostname"  # IPv6 disponible, utilise le hostname
   exec bore local "$PORT" --to "$HOST" $EXTRA_ARGS
 fi
 
+# ============================================
+# FALLBACK IPV4 AVEC CACHE
+# ============================================
+# IPv6 indisponible, bascule sur IPv4
 warn "IPv6 unavailable → fallback IPv4"
 
+# Essaie de récupérer l'IP depuis le cache
 IP=""
 [[ -f "$CACHE_FILE" ]] && IP=$(cat "$CACHE_FILE")
 
+# Si pas en cache, résout l'IP via DNS (dig)
 if [[ -z "$IP" ]]; then
   log "Resolving IPv4..."
   IP=$(dig +short "$HOST" | grep -E '^[0-9.]+' | head -n1)
@@ -80,16 +170,21 @@ if [[ -z "$IP" ]]; then
     error "Failed to resolve IPv4"
     exit 1
   fi
+  # Sauvegarde l'IP dans le cache pour les appels futurs
   echo "$IP" > "$CACHE_FILE"
 fi
 
 log "Using IPv4 $IP"
 
+# ============================================
+# DÉMARRAGE DE BORE AVEC RETRIES
+# ============================================
+# Lance bore avec retry automatique en cas d'échec
 for ((i=1;i<=RETRIES;i++)); do
   log "Starting bore (attempt $i)..."
   bore local "$PORT" --to "$IP" $EXTRA_ARGS &
   pid=$!
-  spinner $pid
-  wait $pid && break
-  warn "Attempt $i failed"
+  spinner $pid          # Affiche l'animation pendant l'exécution
+  wait $pid && break    # Attend la fin et sort si succès
+  warn "Attempt $i failed"  # Retry si échec
 done

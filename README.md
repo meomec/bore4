@@ -17,3 +17,4 @@ Smart CLI wrapper for bore with automatic IPv4 fallback.
 git clone https://github.com/YOURUSER/bore4.git
 cd bore4
 bash install.sh
+# bore4

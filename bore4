@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="bore.pub"
+CACHE_FILE="$HOME/.bore4_cache"
+TIMEOUT=2
+RETRIES=2
+CONFIG_FILE="$HOME/.bore4rc"
+
+[[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
+
+RED="\033[0;31m"
+GREEN="\033[0;32m"
+YELLOW="\033[0;33m"
+BLUE="\033[0;34m"
+RESET="\033[0m"
+
+spinner() {
+  local pid=$1
+  local delay=0.1
+  local spinstr='|/-\'
+  while kill -0 "$pid" 2>/dev/null; do
+    local temp=${spinstr#?}
+    printf " [%c]  " "$spinstr"
+    spinstr=$temp${spinstr%"$temp"}
+    sleep $delay
+    printf "\b\b\b\b\b\b"
+  done
+}
+
+log() { echo -e "${BLUE}🔹 $1${RESET}"; }
+warn() { echo -e "${YELLOW}⚠️  $1${RESET}"; }
+error() { echo -e "${RED}❌ $1${RESET}"; }
+
+print_help() {
+cat <<EOF
+bore4 v1.0 — smart wrapper for bore with IPv4 fallback
+
+Usage:
+  bore4 <local_port> [bore options...]
+
+Examples:
+  bore4 59012
+  bore4 3000 --secret mypass
+
+Options:
+  -h, --help    Show this help
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  print_help
+  exit 0
+fi
+
+PORT="${1:-}"
+if [[ -z "$PORT" ]]; then
+  print_help
+  exit 1
+fi
+
+shift || true
+EXTRA_ARGS="$@"
+
+log "Checking IPv6 connectivity..."
+if nc -6 -z -G "$TIMEOUT" "$HOST" 7835 >/dev/null 2>&1; then
+  log "IPv6 OK → using hostname"
+  exec bore local "$PORT" --to "$HOST" $EXTRA_ARGS
+fi
+
+warn "IPv6 unavailable → fallback IPv4"
+
+IP=""
+[[ -f "$CACHE_FILE" ]] && IP=$(cat "$CACHE_FILE")
+
+if [[ -z "$IP" ]]; then
+  log "Resolving IPv4..."
+  IP=$(dig +short "$HOST" | grep -E '^[0-9.]+' | head -n1)
+  if [[ -z "$IP" ]]; then
+    error "Failed to resolve IPv4"
+    exit 1
+  fi
+  echo "$IP" > "$CACHE_FILE"
+fi
+
+log "Using IPv4 $IP"
+
+for ((i=1;i<=RETRIES;i++)); do
+  log "Starting bore (attempt $i)..."
+  bore local "$PORT" --to "$IP" $EXTRA_ARGS &
+  pid=$!
+  spinner $pid
+  wait $pid && break
+  warn "Attempt $i failed"
+done

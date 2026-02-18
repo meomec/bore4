@@ -1,0 +1,4 @@
+# Example config for bore4
+HOST="bore.pub"
+TIMEOUT=2
+RETRIES=3
